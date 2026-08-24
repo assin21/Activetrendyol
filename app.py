@@ -68,7 +68,7 @@ HTML_TEMPLATE = """
                     بدء التحليل الشامل
                 </button>
             </div>
-            <div id="loading" class="mt-4 hidden text-blue-600 font-medium text-center">جاري سحب بيانات المنتجات، جلب روابط وأسعار المنافسين في السوق، وتوليد التقرير الاستخباراتي... يرجى الانتظار</div>
+            <div id="loading" class="mt-4 hidden text-blue-600 font-medium text-center">جاري سحب بيانات المنتجات عبر المتصفح السحابي، جلب روابط وأسعار المنافسين، وتوليد التقرير الاستخباراتي... يرجى الانتظار</div>
         </div>
 
         <div id="resultContainer" class="hidden space-y-8">
@@ -92,7 +92,6 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- التقرير الاستخباراتي مع زر الطباعة -->
             <div id="printableReport" class="bg-white p-6 rounded-xl shadow-md border border-gray-100">
                 <div class="flex justify-between items-center border-b pb-2 mb-4">
                     <h3 class="text-xl font-bold text-gray-800">التقرير الاستخباراتي التجاري الشامل (مع مقارنة أسعار المنافسين)</h3>
@@ -155,11 +154,9 @@ HTML_TEMPLATE = """
                         data.products.forEach(p => {
                             const imgUrl = (p.images && p.images.length > 0) ? p.images[0] : 'https://via.placeholder.com/150';
                             
-                            // منافس 1
                             const comp1Price = p.competitor_1_price ? p.competitor_1_price + ' TL' : 'غير متوفر';
                             const comp1Link = p.competitor_1_url ? `<a href="${p.competitor_1_url}" target="_blank" class="text-blue-600 underline font-semibold">رابط المنافس الأول</a>` : 'غير متوفر';
                             
-                            // منافس 2
                             const comp2Price = p.competitor_2_price ? p.competitor_2_price + ' TL' : 'غير متوفر';
                             const comp2Link = p.competitor_2_url ? `<a href="${p.competitor_2_url}" target="_blank" class="text-blue-600 underline font-semibold">رابط المنافس الثاني</a>` : 'غير متوفر';
 
@@ -334,51 +331,6 @@ def first_jsonld_product(soup):
                         return x
     return None
 
-def fetch_top_competitors_market(product_title):
-    if not product_title:
-        return None, None, None, None
-    words = re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü0-9]+", product_title)
-    q = " ".join(words[:6])
-    if len(q) < 6:
-        return None, None, None, None
-    search_url = "https://www.trendyol.com/sr?q=" + quote_plus(q)
-    try:
-        r = SESSION.get(search_url, timeout=10)
-        if not r.ok:
-            return None, None, None, None
-        soup = BeautifulSoup(r.text, "html.parser")
-        competitors = []
-        for a in soup.find_all("a", href=True):
-            href = urljoin(search_url, a["href"])
-            if "/p-" not in href:
-                continue
-            clean_link = href.split("?")[0]
-            # نبحث عن السعر قرب رابط المنتج
-            parent = a.find_parent("div")
-            price_val = None
-            if parent:
-                for node in parent.select('[class*="price"], [data-testid*="price"]'):
-                    val = to_float(node.get_text(" ", strip=True))
-                    if val and val > 1:
-                        price_val = val
-                        break
-            if price_val and clean_link not in [c["url"] for c in competitors]:
-                competitors.append({"url": clean_link, "price": price_val})
-            if len(competitors) >= 5:
-                break
-        
-        # ترتيب المنافسين تصاعدياً حسب الأرخص
-        competitors = sorted(competitors, key=lambda x: x["price"])
-        
-        c1_url = competitors[0]["url"] if len(competitors) > 0 else None
-        c1_price = competitors[0]["price"] if len(competitors) > 0 else None
-        c2_url = competitors[1]["url"] if len(competitors) > 1 else None
-        c2_price = competitors[1]["price"] if len(competitors) > 1 else None
-        
-        return c1_url, c1_price, c2_url, c2_price
-    except Exception:
-        return None, None, None, None
-
 def parse_product_html(url, html):
     soup = BeautifulSoup(html, "html.parser")
     data = {
@@ -450,26 +402,62 @@ def parse_product_html(url, html):
                     data["price"] = val
                     break
 
-    # جلب أرخص منافسين اثنين في السوق مع أسعارهم وروابطهم
-    if data["title"]:
-        c1_u, c1_p, c2_u, c2_p = fetch_top_competitors_market(data["title"])
-        data["competitor_1_url"] = c1_u
-        data["competitor_1_price"] = c1_p
-        data["competitor_2_url"] = c2_u
-        data["competitor_2_price"] = c2_p
-
     return data
 
-def collect_with_playwright(url, max_products=MAX_PRODUCTS):
+def fetch_competitors_via_browser(page, product_title):
+    if not product_title:
+        return None, None, None, None
+    words = re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü0-9]+", product_title)
+    q = " ".join(words[:6])
+    if len(q) < 6:
+        return None, None, None, None
+    search_url = "https://www.trendyol.com/sr?q=" + quote_plus(q)
+    try:
+        page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
+        page.wait_for_timeout(1500)
+        soup = BeautifulSoup(page.content(), "html.parser")
+        competitors = []
+        for a in soup.find_all("a", href=True):
+            href = urljoin(search_url, a["href"])
+            if "/p-" not in href:
+                continue
+            clean_link = href.split("?")[0]
+            parent = a.find_parent("div")
+            price_val = None
+            if parent:
+                for node in parent.select('[class*="price"], [data-testid*="price"]'):
+                    val = to_float(node.get_text(" ", strip=True))
+                    if val and val > 1:
+                        price_val = val
+                        break
+            if price_val and clean_link not in [c["url"] for c in competitors]:
+                competitors.append({"url": clean_link, "price": price_val})
+            if len(competitors) >= 5:
+                break
+        
+        competitors = sorted(competitors, key=lambda x: x["price"])
+        c1_url = competitors[0]["url"] if len(competitors) > 0 else None
+        c1_price = competitors[0]["price"] if len(competitors) > 0 else None
+        c2_url = competitors[1]["url"] if len(competitors) > 1 else None
+        c2_price = competitors[1]["price"] if len(competitors) > 1 else None
+        
+        return c1_url, c1_price, c2_url, c2_price
+    except Exception:
+        return None, None, None, None
+
+def collect_store_data(url, max_products=MAX_PRODUCTS):
     if sync_playwright is None:
-        return collect_with_requests(url, max_products)
+        raise RuntimeError("Playwright غير مثبت")
 
     store_html = ""
     product_urls = []
     final_url = url
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
         page = browser.new_page(
             user_agent=SESSION.headers["User-Agent"],
             locale="tr-TR",
@@ -477,15 +465,15 @@ def collect_with_playwright(url, max_products=MAX_PRODUCTS):
         )
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(3000)
             final_url = page.url
-            for _ in range(4):
-                page.mouse.wheel(0, 1800)
-                page.wait_for_timeout(800)
+            for _ in range(5):
+                page.mouse.wheel(0, 2000)
+                page.wait_for_timeout(1000)
             store_html = page.content()
 
             links = page.locator("a").evaluate_all(
-                """els => els.map(a => ({href:a.href, text:(a.innerText||'').trim()}))"""
+                """els => els.map(a => ({href:a.href}))"""
             )
             seen = set()
             for item in links:
@@ -499,60 +487,28 @@ def collect_with_playwright(url, max_products=MAX_PRODUCTS):
                         product_urls.append(clean)
                 if len(product_urls) >= max_products:
                     break
-        finally:
-            browser.close()
 
-    store_info = parse_store_page(final_url, store_html)
-    products = []
+            store_info = parse_store_page(final_url, store_html)
+            products = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            user_agent=SESSION.headers["User-Agent"],
-            locale="tr-TR",
-            viewport={"width": 1440, "height": 1000},
-        )
-        try:
             for product_url in product_urls[:MAX_PRODUCT_PAGES]:
                 try:
                     page.goto(product_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(700)
-                    products.append(parse_product_html(product_url, page.content()))
+                    page.wait_for_timeout(1000)
+                    p_data = parse_product_html(product_url, page.content())
+                    if p_data.get("title"):
+                        c1_u, c1_p, c2_u, c2_p = fetch_competitors_via_browser(page, p_data["title"])
+                        p_data["competitor_1_url"] = c1_u
+                        p_data["competitor_1_price"] = c1_p
+                        p_data["competitor_2_url"] = c2_u
+                        p_data["competitor_2_price"] = c2_p
+                    products.append(p_data)
                 except Exception:
                     continue
+
         finally:
             browser.close()
 
-    return store_info, products
-
-def collect_with_requests(url, max_products=MAX_PRODUCTS):
-    r = SESSION.get(url, timeout=20)
-    r.raise_for_status()
-    final_url = r.url
-    html = r.text
-    store_info = parse_store_page(final_url, html)
-    soup = BeautifulSoup(html, "html.parser")
-    product_urls = []
-    seen = set()
-
-    for a in soup.find_all("a", href=True):
-        href = urljoin(final_url, a["href"])
-        if "trendyol.com" in href and re.search(r"[-/]p-\d+", href, re.I):
-            href = href.split("?")[0]
-            if href not in seen:
-                seen.add(href)
-                product_urls.append(href)
-        if len(product_urls) >= max_products:
-            break
-
-    products = []
-    for product_url in product_urls[:MAX_PRODUCT_PAGES]:
-        try:
-            pr = SESSION.get(product_url, timeout=20)
-            if pr.ok:
-                products.append(parse_product_html(product_url, pr.text))
-        except Exception:
-            continue
     return store_info, products
 
 def parse_store_page(url, html):
@@ -621,38 +577,7 @@ def calculate_stats(products):
     }
 
 def build_local_competitor_candidates(products):
-    candidates = {}
-    titles = [clean_text(p.get("title")) for p in products if p.get("title")]
-    queries = []
-    for title in titles[:MAX_COMPETITOR_SEARCHES]:
-        words = re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü0-9]+", title)
-        q = " ".join(words[:7])
-        if len(q) >= 8 and q not in queries:
-            queries.append(q)
-
-    for q in queries:
-        search_url = "https://www.trendyol.com/sr?q=" + quote_plus(q)
-        try:
-            r = SESSION.get(search_url, timeout=15)
-            if not r.ok:
-                continue
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.find_all("a", href=True):
-                href = urljoin(search_url, a["href"])
-                if "/magaza/" not in href:
-                    continue
-                m = re.search(r"/magaza/([^/?#]+)", href)
-                if not m:
-                    continue
-                slug = m.group(1)
-                candidates[href.split("?")[0]] = {
-                    "store_url": href.split("?")[0],
-                    "store_slug": slug,
-                    "source_query": q,
-                }
-        except Exception:
-            continue
-    return list(candidates.values())[:10]
+    return []
 
 def make_ai_report(payload):
     if not GEMINI_API_KEY:
@@ -704,11 +629,7 @@ def analyze(url):
     started = time.time()
     resolved = resolve_url(url)
 
-    try:
-        store_info, products = collect_with_playwright(resolved)
-    except Exception:
-        store_info, products = collect_with_requests(resolved)
-
+    store_info, products = collect_store_data(resolved)
     stats = calculate_stats(products)
     competitor_candidates = build_local_competitor_candidates(products)
 
